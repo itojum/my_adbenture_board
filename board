@@ -4,10 +4,12 @@
 # Adventure Board (PicoRuby R2P2) に Mac から書き込み・実行するツール。
 # 標準ライブラリだけで動く。ファイル転送は PicoModem プロトコル。
 #
-#   ./board push [main.rb]        /home/run.rb に書き込み、再起動して実行（Ctrl-C で停止）
-#   ./board put LOCAL [REMOTE]    書き込むだけ（REMOTE 既定: /home/run.rb）
+#   ./board push [main.rb]        lib/*.rb を /lib に、main.rb を /home/run.rb に書き込み、
+#                                 再起動して実行（Ctrl-C で停止）
+#   ./board put LOCAL [REMOTE]    1 ファイルだけ書き込む（REMOTE 既定: /home/run.rb）
 #   ./board run [REMOTE]          再起動して実行し、出力を表示
-#   ./board app [main.rb]         /home/app.rb に書き込む（起動時に自動実行）
+#   ./board app [main.rb]         lib/*.rb を /lib に、main.rb を /home/app.rb に書き込む
+#                                 （起動時に自動実行）
 #   ./board stop                  実行中のプログラムを止める
 #   ./board sh "ls /home"         シェルのコマンドを打って結果を表示
 #   ./board ports                 シェルのポートを探す
@@ -301,9 +303,19 @@ begin
   when "push", "put", "app"
     local = ARGV[0] || (cmd == "put" ? usage : "main.rb")
     remote = cmd == "app" ? "/home/app.rb" : (ARGV[1] || "/home/run.rb")
-    data = File.binread(local)
-    board.put(data, remote)
-    puts "[board] #{local} -> #{remote} (#{data.bytesize} bytes, #{board.port})"
+    files = []
+    # main.rb の隣の lib/*.rb はボードの /lib に置く（require 'name' で読める）
+    if cmd != "put"
+      Dir.glob(File.join(File.dirname(local), "lib", "*.rb")).sort.each do |path|
+        files << [path, "/lib/#{File.basename(path)}"]
+      end
+    end
+    files << [local, remote]
+    files.each do |path, dest|
+      data = File.binread(path)
+      board.put(data, dest)
+      puts "[board] #{path} -> #{dest} (#{data.bytesize} bytes, #{board.port})"
+    end
     if cmd == "push"
       board.reboot
       puts "[board] 再起動して #{remote} を実行（Ctrl-C で停止）"
