@@ -1,0 +1,46 @@
+# my_adbenture_board
+
+PicoRuby の [Adventure Board](https://picorubykaigi.org/adventure-board/) で動かすプログラムです。
+ボードで動かすコードは `main.rb` です。
+
+## board: Mac から書き込む・実行する
+
+`board` は、Web コンソールを使わずに Mac のターミナルからボードを操作する Ruby スクリプトです。
+Mac に入っている Ruby の標準ライブラリだけで動きます（gem のインストールは不要）。
+
+### 準備
+
+1. ボードを USB で Mac につなぐ
+2. ブラウザの [Web コンソール](https://picorubykaigi.org/adventure-board-console/) を開いているなら、切断するかタブを閉じる
+   （コンソールがポートを使っていると `board` から開けません）
+
+### 使い方
+
+```bash
+./board push
+```
+
+`main.rb` を `/home/run.rb` に書き込み、ボードを再起動してから実行します。
+ボードの出力がそのまま表示され、Ctrl-C でボードのプログラムも止まります。
+
+| コマンド | 内容 |
+| --- | --- |
+| `./board push [LOCAL]` | LOCAL（既定: `main.rb`）を `/home/run.rb` に書き込み、再起動して実行 |
+| `./board put LOCAL [REMOTE]` | 書き込むだけ（REMOTE 既定: `/home/run.rb`） |
+| `./board run [REMOTE]` | 再起動して REMOTE（既定: `/home/run.rb`）を実行 |
+| `./board app [LOCAL]` | `/home/app.rb` に書き込む（ボードの起動時に自動で実行される） |
+| `./board stop` | 実行中のプログラムを止める |
+| `./board sh "COMMAND"` | ボードのシェルでコマンドを実行して結果を表示（例: `./board sh "ls /home"`） |
+| `./board ports` | ボードのシェルのポートを探して表示 |
+
+### 仕組みと注意
+
+- ボードは USB のシリアルポートを 3 つ出します（`/dev/cu.usbmodem*`）。
+  `board` は Ctrl-C を送ってシェルのプロンプト `$> ` が返ってくるポートを使います。
+  そのため、ポートを探すだけでも実行中のプログラムは止まります。
+  決まったポートを使うなら `BOARD_PORT=/dev/cu.usbmodem1101 ./board push` のように指定します。
+- ファイルは Web コンソールと同じ PicoModem プロトコルで送り、ボードが返す CRC32 で中身を照合します。
+- `push` と `run` は実行の前にボードを再起動します。
+  Ctrl-C で止めたプログラムが SPI などをつかんだままだと、次の実行で `RuntimeError` になるためです。
+- 再起動中にポートを開け閉めしたりキーを送ったりすると、ボードが再起動を繰り返すことがあります。
+  `board` は再起動後、プロンプトが出るまで何も送らずに待ちます。

@@ -1,0 +1,331 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Adventure Board (PicoRuby R2P2) に Mac から書き込み・実行するツール。
+# 標準ライブラリだけで動く。ファイル転送は PicoModem プロトコル。
+#
+#   ./board push [main.rb]        /home/run.rb に書き込み、再起動して実行（Ctrl-C で停止）
+#   ./board put LOCAL [REMOTE]    書き込むだけ（REMOTE 既定: /home/run.rb）
+#   ./board run [REMOTE]          再起動して実行し、出力を表示
+#   ./board app [main.rb]         /home/app.rb に書き込む（起動時に自動実行）
+#   ./board stop                  実行中のプログラムを止める
+#   ./board sh "ls /home"         シェルのコマンドを打って結果を表示
+#   ./board ports                 シェルのポートを探す
+#
+# ポートは自動で探す。固定するなら BOARD_PORT=/dev/cu.usbmodemXXXX。
+# Web コンソールが接続中だとポートを使えないので、先に切断しておく。
+
+require "io/console"
+require "zlib"
+
+class Board
+  STX = 0x02
+  ACK = 0x06
+  CTRL_B = "\x02".b
+  CTRL_C = "\x03".b
+  FILE_WRITE = 0x02
+  CHUNK = 0x04
+  FILE_ACK = 0x82
+  CHUNK_ACK = 0x84
+  DONE_ACK = 0x8F
+  ERROR = 0xFE
+  CHUNK_SIZE = 480
+  TIMEOUT = 5.0
+  PROMPT = "$> ".b
+
+  class Error < StandardError; end
+
+  def self.crc16(data) # CRC-16/CCITT-FALSE
+    crc = 0xFFFF
+    data.each_byte do |b|
+      crc ^= b << 8
+      8.times { crc = (crc & 0x8000).zero? ? (crc << 1) & 0xFFFF : ((crc << 1) ^ 0x1021) & 0xFFFF }
+    end
+    crc
+  end
+
+  def self.frame(cmd, payload = "".b)
+    body = [cmd].pack("C") + payload.b
+    [STX, body.bytesize].pack("Cn") + body + [crc16(body)].pack("n")
+  end
+
+  def self.candidates
+    Dir.glob("/dev/cu.usbmodem*").sort
+  end
+
+  def self.find_port
+    return ENV["BOARD_PORT"] if ENV["BOARD_PORT"]
+
+    busy = []
+    candidates.each do |port|
+      board = begin
+        new(port)
+      rescue Errno::EBUSY
+        busy << port
+        next
+      rescue SystemCallError
+        next
+      end
+      begin
+        board.drain
+        board.write(CTRL_C)
+        board.until_seen(PROMPT, 1.0)
+        return port
+      rescue Error
+        next
+      ensure
+        board.close
+      end
+    end
+    msg = "シェルのポートが見つかりません"
+    msg += "（#{busy.join(', ')} は使用中。Web コンソールを切断してください）" unless busy.empty?
+    abort msg
+  end
+
+  def initialize(port)
+    @port = port
+    @io = File.open(port, File::RDWR | File::NOCTTY | File::NONBLOCK)
+    @io.raw!
+    @pending = "".b
+  end
+
+  attr_reader :port
+
+  def close
+    @io.close
+  end
+
+  def write(data)
+    data = data.b
+    until data.empty?
+      IO.select(nil, [@io], nil, TIMEOUT)
+      n = @io.write_nonblock(data, exception: false)
+      data = data.byteslice(n..) if n.is_a?(Integer)
+    end
+  end
+
+  def read(timeout = 0.05)
+    return "".b unless IO.select([@io], nil, nil, timeout)
+
+    @io.read_nonblock(4096, exception: false).then { |r| r.is_a?(String) ? r : "".b }
+  rescue EOFError
+    "".b
+  end
+
+  def drain
+    loop { break if read(0.05).empty? }
+  end
+
+  def until_seen(marker, timeout = TIMEOUT)
+    buf = "".b
+    deadline = now + timeout
+    until buf.include?(marker)
+      raise Error, "#{marker.inspect} が来ません（受信: #{buf[-80..] || buf}）" if now > deadline
+
+      buf << read
+    end
+    buf
+  end
+
+  # Ctrl-C で実行中のプログラムを止め、プロンプトを待つ
+  def sync
+    drain
+    write(CTRL_C)
+    until_seen(PROMPT)
+    drain
+  end
+
+  # --- PicoModem ---------------------------------------------------------
+
+  def put(data, remote)
+    data = data.b
+    sync
+    write(CTRL_B)
+    deadline = now + TIMEOUT
+    until read.include?(ACK.chr)
+      raise Error, "PicoModem の ACK が来ません" if now > deadline
+    end
+    sleep 0.2
+    @pending = "".b
+
+    write(self.class.frame(FILE_WRITE, [data.bytesize].pack("N") + remote.b))
+    expect(FILE_ACK)
+    0.step(data.bytesize - 1, CHUNK_SIZE) do |off|
+      write(self.class.frame(CHUNK, data.byteslice(off, CHUNK_SIZE)))
+      expect(CHUNK_ACK)
+    end
+    cmd, payload = recv
+    status, crc = payload.unpack("CN")
+    if cmd != DONE_ACK || status != 0 || crc != Zlib.crc32(data)
+      raise Error, "書き込みの検証に失敗しました（status=#{status}）"
+    end
+
+    until_seen(PROMPT)
+  end
+
+  # --- shell -------------------------------------------------------------
+
+  # R2P2 の行エディタは一気に送ると取りこぼすので少しずつ送る
+  def type_line(line)
+    "#{line}\r".b.scan(/.{1,16}/mn).each do |part|
+      write(part)
+      sleep 0.02
+    end
+  end
+
+  # 行を打って、エコーされた入力行を読み飛ばす
+  def command(line)
+    type_line(line)
+    until_seen("\n", 2)
+  end
+
+  # reboot して（SPI などの周辺機器を初期化するため）、起動後のプロンプトまで待つ。
+  # 起動中にポートを開け閉めしたりキーを送ったりすると再起動を繰り返すので、
+  # ポートを開いたら何も送らずにプロンプトを待つ
+  def reboot
+    sync
+    type_line("reboot")
+    deadline = now + 3
+    begin
+      read(0.2) while now < deadline # ポートが消えるまで待つ
+    rescue SystemCallError
+      nil
+    end
+    @io.close unless @io.closed?
+
+    deadline = now + 30
+    buf = "".b
+    loop do
+      if now > deadline
+        sync # app.rb が動き続けている場合などは Ctrl-C で止める
+        break
+      end
+
+      if @io.closed?
+        begin
+          @io = File.open(@port, File::RDWR | File::NOCTTY | File::NONBLOCK)
+          @io.raw!
+        rescue SystemCallError
+          sleep 0.3
+          next
+        end
+      end
+      begin
+        buf << read(0.2)
+      rescue SystemCallError # 起動途中でポートが消えた
+        @io.close
+        next
+      end
+      start = buf.index("Starting shell")
+      break if start && buf.index(PROMPT, start)
+    end
+    @pending = "".b
+    drain
+  end
+
+  ANSI = /\e\[[0-9;?]*[A-Za-z]/n
+
+  # 出力を表示する。Mac 側の Ctrl-C でボードのプログラムも止める
+  def follow(stop_at_prompt: false)
+    if stop_at_prompt # シェルのコマンド: プロンプトまで集めて、プロンプトを除いて表示
+      $stdout.write(until_seen(PROMPT).gsub(ANSI, "").sub(/\$> \z/n, ""))
+      return
+    end
+    loop do
+      out = read(0.1)
+      next if out.empty?
+
+      $stdout.write(out.gsub(ANSI, ""))
+      $stdout.flush
+    end
+  rescue Interrupt
+    write(CTRL_C)
+    begin
+      until_seen(PROMPT, 2)
+    rescue Error
+      nil
+    end
+    puts "\n[board] 停止しました"
+  end
+
+  private
+
+  def now
+    Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
+
+  def take(n, deadline)
+    @pending << read while @pending.bytesize < n && now <= deadline
+    raise Error, "ボードから応答がありません" if @pending.bytesize < n
+
+    out = @pending.byteslice(0, n)
+    @pending = @pending.byteslice(n..)
+    out
+  end
+
+  def recv
+    deadline = now + TIMEOUT
+    nil until take(1, deadline).getbyte(0) == STX
+    len = take(2, deadline).unpack1("n")
+    body = take(len, deadline)
+    crc = take(2, deadline).unpack1("n")
+    raise Error, "ボードからのフレームの CRC が合いません" if self.class.crc16(body) != crc
+
+    cmd = body.getbyte(0)
+    raise Error, "ボード: #{body.byteslice(1..).force_encoding('UTF-8')}" if cmd == ERROR
+
+    [cmd, body.byteslice(1..)]
+  end
+
+  def expect(cmd)
+    got, = recv
+    raise Error, format("0x%02X を待っていたら 0x%02X が来ました", cmd, got) if got != cmd
+  end
+end
+
+def usage
+  abort File.readlines(__FILE__).drop(3).take_while { |l| l.start_with?("#") }.map { |l| l.sub(/^# ?/, "") }.join
+end
+
+cmd = ARGV.shift or usage
+if cmd == "ports"
+  puts "候補: #{Board.candidates.join(' ')}"
+  puts "シェル: #{Board.find_port}"
+  exit
+end
+usage unless %w[push put run app stop sh].include?(cmd)
+
+board = Board.new(Board.find_port)
+begin
+  case cmd
+  when "push", "put", "app"
+    local = ARGV[0] || (cmd == "put" ? usage : "main.rb")
+    remote = cmd == "app" ? "/home/app.rb" : (ARGV[1] || "/home/run.rb")
+    data = File.binread(local)
+    board.put(data, remote)
+    puts "[board] #{local} -> #{remote} (#{data.bytesize} bytes, #{board.port})"
+    if cmd == "push"
+      board.reboot
+      puts "[board] 再起動して #{remote} を実行（Ctrl-C で停止）"
+      board.command(remote)
+      board.follow
+    end
+  when "run"
+    remote = ARGV[0] || "/home/run.rb"
+    board.reboot
+    puts "[board] 再起動して #{remote} を実行（Ctrl-C で停止）"
+    board.command(remote)
+    board.follow
+  when "stop"
+    board.sync
+    puts "[board] 停止しました"
+  when "sh"
+    board.sync
+    board.command(ARGV.join(" "))
+    board.follow(stop_at_prompt: true)
+  end
+rescue Board::Error => e
+  abort "[board] #{e.message}"
+ensure
+  board.close
+end
