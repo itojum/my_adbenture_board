@@ -4,15 +4,18 @@
 # Adventure Board (PicoRuby R2P2) に Mac から書き込み・実行するツール。
 # 標準ライブラリだけで動く。ファイル転送は PicoModem プロトコル。
 #
-#   ./board push [main.rb]        lib/*.rb を /lib に、main.rb を /home/run.rb に書き込み、
+#   ./board push [main.rb]        lib/*.rb を /lib に、data/* と main.rb を /home に書き込み、
 #                                 再起動して実行（Ctrl-C で停止）
 #   ./board put LOCAL [REMOTE]    1 ファイルだけ書き込む（REMOTE 既定: /home/run.rb）
 #   ./board run [REMOTE]          再起動して実行し、出力を表示
-#   ./board app [main.rb]         lib/*.rb を /lib に、main.rb を /home/app.rb に書き込む
+#   ./board app [main.rb]         lib/*.rb を /lib に、data/* を /home に、main.rb を /home/app.rb に書き込む
 #                                 （起動時に自動実行）
 #   ./board stop                  実行中のプログラムを止める
 #   ./board sh "ls /home"         シェルのコマンドを打って結果を表示
 #   ./board ports                 シェルのポートを探す
+#
+# push / run に -d を付けると、起動を見届けたら（数秒）プログラムを動かしたまま終わる。
+# 付けないときは、Mac 側で Ctrl-C を押すとボードのプログラムも止まる。
 #
 # ポートは自動で探す。固定するなら BOARD_PORT=/dev/cu.usbmodemXXXX。
 # Web コンソールが接続中だとポートを使えないので、先に切断しておく。
@@ -227,13 +230,17 @@ class Board
 
   ANSI = /\e\[[0-9;?]*[A-Za-z]/n
 
-  # 出力を表示する。Mac 側の Ctrl-C でボードのプログラムも止める
-  def follow(stop_at_prompt: false)
+  # 出力を表示する。Mac 側の Ctrl-C でボードのプログラムも止める。
+  # seconds を渡すと、その秒数だけ表示してプログラムを動かしたまま戻る
+  def follow(stop_at_prompt: false, seconds: nil)
     if stop_at_prompt # シェルのコマンド: プロンプトまで集めて、プロンプトを除いて表示
       $stdout.write(until_seen(PROMPT).gsub(ANSI, "").sub(/\$> \z/n, ""))
       return
     end
+    deadline = seconds && now + seconds
     loop do
+      return if deadline && now > deadline
+
       out = read(0.1)
       next if out.empty?
 
@@ -289,6 +296,7 @@ def usage
   abort File.readlines(__FILE__).drop(3).take_while { |l| l.start_with?("#") }.map { |l| l.sub(/^# ?/, "") }.join
 end
 
+detach = !ARGV.delete("-d").nil? | !ARGV.delete("--detach").nil?
 cmd = ARGV.shift or usage
 if cmd == "ports"
   puts "候補: #{Board.candidates.join(' ')}"
@@ -296,6 +304,17 @@ if cmd == "ports"
   exit
 end
 usage unless %w[push put run app stop sh].include?(cmd)
+
+def run_on(board, remote, detach)
+  board.command(remote)
+  if detach
+    puts "[board] 再起動して #{remote} を実行しました（ボードで動かしたまま終わります）"
+    board.follow(seconds: 3) # 起動直後のエラーだけ確認する
+  else
+    puts "[board] 再起動して #{remote} を実行（Ctrl-C で停止）"
+    board.follow
+  end
+end
 
 board = Board.new(Board.find_port)
 begin
@@ -309,6 +328,10 @@ begin
       Dir.glob(File.join(File.dirname(local), "lib", "*.rb")).sort.each do |path|
         files << [path, "/lib/#{File.basename(path)}"]
       end
+      # data/ のファイル（画像など）はボードの /home に置く
+      Dir.glob(File.join(File.dirname(local), "data", "*")).sort.each do |path|
+        files << [path, "/home/#{File.basename(path)}"] if File.file?(path)
+      end
     end
     files << [local, remote]
     files.each do |path, dest|
@@ -318,16 +341,12 @@ begin
     end
     if cmd == "push"
       board.reboot
-      puts "[board] 再起動して #{remote} を実行（Ctrl-C で停止）"
-      board.command(remote)
-      board.follow
+      run_on(board, remote, detach)
     end
   when "run"
     remote = ARGV[0] || "/home/run.rb"
     board.reboot
-    puts "[board] 再起動して #{remote} を実行（Ctrl-C で停止）"
-    board.command(remote)
-    board.follow
+    run_on(board, remote, detach)
   when "stop"
     board.sync
     puts "[board] 停止しました"
