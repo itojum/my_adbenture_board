@@ -41,7 +41,7 @@ def show_ruby(m, lcd)
   plot_mask(m, RUBY_BRIGHT, BRIGHT)
   plot_mask(m, RUBY_DIM, DIM)
   m.show
-  lcd.draw_rle(0, 0, 40, 40, RUBY_PAL, ICON_IMG, 6)
+  lcd.draw_image(0, 0, "/home/icon.img", 3) # 80x80 を 3 倍
 end
 
 def show_twitter(m, lcd)

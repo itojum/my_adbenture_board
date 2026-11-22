@@ -27,48 +27,80 @@ class ST7789
     @cs.write(1)
   end
 
-  # ランレングス圧縮画像を描く
-  # '0'-'F' = 色番号 1 ドット / 'a'-'z' + 色 = 同じ色が 2〜27 ドット続く
-  def draw_rle(x, y, w, h, pal, img, s)
-    tbl = Array.new(71)
+  # 画像ファイル（tools/pack_image で作る）を少しずつ読んで展開しながら描く。
+  # 画像全体をメモリに載せないので、大きな画像でもメモリを食わない。s: 拡大率
+  # 画素は PackBits 圧縮: n < 128 なら続く n+1 バイトをそのまま、
+  # n > 128 なら次の 1 バイトを 257-n 回くり返す
+  def draw_image(x, y, path, s = 1)
+    f = File.open(path, "r")
+    hd = f.read(6)
+    w = (hd.getbyte(0) << 8) | hd.getbyte(1)
+    h = (hd.getbyte(2) << 8) | hd.getbyte(3)
+    bpp = hd.getbyte(4)
+    n = hd.getbyte(5)
+    pal = f.read(n * 2)
+    tbl = Array.new(n)
     i = 0
-    while i < 16
-      c = pal[i]
-      tbl[i < 10 ? 48 + i : 55 + i] = ((c >> 8).chr + (c & 0xFF).chr) * s
+    while i < n
+      tbl[i] = (pal.getbyte(i * 2).chr + pal.getbyte(i * 2 + 1).chr) * s
       i += 1
     end
+    pal = nil
+    row_bytes = (w * bpp + 7) / 8
     @cs.write(0)
     win(x, y, w * s, h * s)
+    chunk = ""
+    ci = 0
+    lit = 0     # そのまま出すバイトの残り
+    rep = 0     # くり返す回数（次のバイトを待っている）
+    nb = 0      # 今の行に出したバイト数
     buf = ""
-    n = 0
-    i = 0
-    len = img.size
-    while i < len
-      b = img.getbyte(i)
-      run = 1
-      if b >= 97
-        run = b - 95
-        i += 1
-        b = img.getbyte(i)
+    r = 0
+    while r < h
+      if ci >= chunk.bytesize # size は文字数を数えるので使わない
+        chunk = f.read(64)
+        break unless chunk
+        ci = 0
       end
-      px = tbl[b]
-      while run > 0
-        buf << px
-        n += 1
-        run -= 1
-        if n == w
+      b = chunk.getbyte(ci)
+      ci += 1
+      if lit > 0
+        cnt = 1
+        lit -= 1
+      elsif rep > 0
+        cnt = rep
+        rep = 0
+      else
+        if b < 128
+          lit = b + 1
+        elsif b > 128
+          rep = 257 - b
+        end
+        cnt = 0
+      end
+      while cnt > 0
+        if bpp == 4
+          buf << tbl[b >> 4]
+          buf << tbl[b & 0x0F] if nb * 2 + 1 < w
+        else
+          buf << tbl[b]
+        end
+        nb += 1
+        if nb == row_bytes
           k = 0
           while k < s
             @spi.write(buf)
             k += 1
           end
           buf = ""
-          n = 0
+          nb = 0
+          r += 1
         end
+        cnt -= 1
       end
-      i += 1
     end
     @cs.write(1)
+    f.close
   end
 
   def cmd(c, d = nil)

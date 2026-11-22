@@ -1,0 +1,101 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# 画像コンバータの出力（*_PAL と *_DATA の Ruby コード）を、
+# ボードで読む圧縮バイナリ画像に変換する。画質は変わらない（可逆圧縮）。
+#
+#   tools/pack_image images/icon.rb data/icon.img
+#
+# 出力形式（数値はビッグエンディアン）:
+#   幅 u16 / 高さ u16 / bpp u8（4 か 8）/ 色数 u8 / パレット RGB565 u16 x 色数 /
+#   画素: 1 行ずつ並べたバイト列を PackBits で圧縮したもの
+#     4bpp なら 1 バイトに 2 ドット（左のドットが上位 4 ビット）
+#     PackBits: 先頭バイト n が 0〜127 なら続く n+1 バイトをそのまま、
+#               129〜255 なら次の 1 バイトを 257-n 回くり返す（128 は使わない）
+
+CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+-"
+
+def packbits(data)
+  out = []
+  lit = []
+  flush = lambda do
+    until lit.empty?
+      part = lit.shift(128)
+      out << part.size - 1
+      out.concat(part)
+    end
+  end
+  i = 0
+  while i < data.size
+    j = i
+    j += 1 while j < data.size && data[j] == data[i] && j - i < 128
+    run = j - i
+    # 2 個の連続は、リテラルの途中なら続けたほうが小さい
+    if run >= 3 || (run == 2 && lit.empty?)
+      flush.call
+      out << 257 - run << data[i]
+      i = j
+    else
+      lit << data[i]
+      i += 1
+    end
+  end
+  flush.call
+  out.pack("C*")
+end
+
+def unpackbits(data, size)
+  out = []
+  i = 0
+  while out.size < size
+    n = data.getbyte(i)
+    i += 1
+    if n < 128
+      out.concat(data.byteslice(i, n + 1).bytes)
+      i += n + 1
+    elsif n > 128
+      out.concat([data.getbyte(i)] * (257 - n))
+      i += 1
+    end
+  end
+  out
+end
+
+src_path, out_path = ARGV
+abort "使い方: tools/pack_image SRC.rb OUT.img" unless src_path && out_path
+
+src = File.read(src_path, encoding: "UTF-8")
+pal_src = src[/_PAL\s*=\s*\[(.*?)\]/m, 1] or abort "#{src_path}: *_PAL = [...] が見つかりません"
+data_src = src[/_DATA\s*=\s*\[(.*?)\]/m, 1] or abort "#{src_path}: *_DATA = [...] が見つかりません"
+
+pal = pal_src.scan(/0x\h+|\d+/).map { |v| Integer(v) }
+rows = data_src.scan(/['"]([^'"]*)['"]/).flatten
+abort "画像の行がありません" if rows.empty?
+
+w = rows.first.size
+h = rows.size
+abort "行の長さがそろっていません" unless rows.all? { |r| r.size == w }
+abort "色数が多すぎます（最大 64）" if pal.size > 64
+
+bpp = pal.size <= 16 ? 4 : 8
+rows_bytes = rows.map do |row|
+  idx = row.each_char.map do |ch|
+    i = CHARS.index(ch) or abort "未知の文字 #{ch.inspect}"
+    abort "パレットにない色番号 #{ch.inspect}" if i >= pal.size
+    i
+  end
+  if bpp == 4
+    idx << 0 if idx.size.odd?
+    idx.each_slice(2).map { |a, b| (a << 4) | b }
+  else
+    idx
+  end
+end
+raw = rows_bytes.flatten
+packed = packbits(raw)
+abort "圧縮の検証に失敗しました" unless unpackbits(packed, raw.size) == raw
+
+out = [w, h, bpp, pal.size].pack("nnCC") + pal.pack("n*") + packed
+File.binwrite(out_path, out)
+puts "#{src_path} -> #{out_path}: #{w}x#{h}, #{pal.size} 色, #{bpp}bpp, " \
+     "#{out.bytesize} バイト（圧縮前の画素 #{raw.size} → #{packed.bytesize} バイト）"
