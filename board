@@ -238,12 +238,20 @@ class Board
       return
     end
     deadline = seconds && now + seconds
+    tail = "".b
     loop do
       return if deadline && now > deadline
 
       out = read(0.1)
       next if out.empty?
 
+      # プログラムが終わって（エラーを含む）プロンプトに戻ったら抜ける
+      tail = (tail + out)[-64..] || (tail + out)
+      if tail.include?(PROMPT)
+        $stdout.write(out.gsub(ANSI, "").sub(/\$> .*\z/mn, ""))
+        puts "[board] プログラムが終了しました"
+        return
+      end
       $stdout.write(out.gsub(ANSI, ""))
       $stdout.flush
     end
@@ -309,7 +317,7 @@ def run_on(board, remote, detach)
   board.command(remote)
   if detach
     puts "[board] 再起動して #{remote} を実行しました（ボードで動かしたまま終わります）"
-    board.follow(seconds: 3) # 起動直後のエラーだけ確認する
+    board.follow(seconds: 8) # 起動直後のエラーだけ確認する
   else
     puts "[board] 再起動して #{remote} を実行（Ctrl-C で停止）"
     board.follow
@@ -357,6 +365,12 @@ begin
   end
 rescue Board::Error => e
   abort "[board] #{e.message}"
+rescue Errno::ENXIO, Errno::EIO, Errno::ENODEV
+  abort "\n[board] ボードとの接続が切れました"
 ensure
-  board.close
+  begin
+    board.close
+  rescue SystemCallError, IOError
+    nil
+  end
 end
