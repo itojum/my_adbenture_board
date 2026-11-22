@@ -4,50 +4,37 @@ GC.start
 
 matrix = AdventureBoard.matrix
 
-ART = [
-  "................",
-  "................",
-  "...##########...",
-  "..#++#++++#++#..",
-  ".#++#++++++#++#.",
-  "################",
-  ".#+++#++++#+++#.",
-  "..#+++#++#+++#..",
-  "...#+++##+++#...",
-  "....#++##++#....",
-  ".....#+##+#.....",
-  "......####......",
-  ".......##.......",
-  "................",
-  "................",
-  "................"
+# 16x16 ドット絵: 1 行 = 16bit（左端が最上位ビット）
+RUBY_BRIGHT = [
+  0x0000, 0x0000, 0x1FF8, 0x2424, 0x4812, 0xFFFF, 0x4422, 0x2244,
+  0x1188, 0x0990, 0x05A0, 0x03C0, 0x0180, 0x0000, 0x0000, 0x0000
+]
+RUBY_DIM = [
+  0x0000, 0x0000, 0x0000, 0x1BD8, 0x37EC, 0x0000, 0x3BDC, 0x1DB8,
+  0x0E70, 0x0660, 0x0240, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000
+]
+TWITTER_ART = [
+  0x0000, 0x0000, 0x001A, 0x203E, 0x307E, 0x3C7C, 0x1F7C, 0x3FFC,
+  0x1FF8, 0x0FF8, 0x0FF0, 0x07E0, 0x1FC0, 0x7E00, 0x0000, 0x0000
 ]
 BRIGHT = 100
 DIM = 25
 
-matrix.clear
-y = 0
-while y < 16
-  row = ART[y]
-  x = 0
-  while x < 16
-    ch = row[x]
-    if ch == "#"
-      matrix.set(x + 1, y + 1, BRIGHT)
-    elsif ch == "+"
-      matrix.set(x + 1, y + 1, DIM)
+def plot_mask(m, rows, level)
+  y = 0
+  while y < 16
+    bits = rows[y]
+    x = 0
+    while x < 16
+      m.set(x + 1, y + 1, level) if (bits >> (15 - x)) & 1 == 1
+      x += 1
     end
-    x += 1
+    y += 1
   end
-  y += 1
 end
-matrix.show
-
 
 class ST7789
-  attr_reader :width, :height
-
-  def initialize(spi, cs, dc, rst, width = 240, height = 240, xo = 0, yo = 0)
+  def initialize(spi, cs, dc, rst)
     @spi = spi
     @cs = GPIO.new(cs, GPIO::OUT)
     @cs.write(1)
@@ -55,29 +42,14 @@ class ST7789
     r = GPIO.new(rst, GPIO::OUT)
     r.write(0); sleep_ms(10)
     r.write(1); sleep_ms(120)
-    @width = width
-    @height = height
-    @xo = xo
-    @yo = yo
     cmd(0x11); sleep_ms(120) # SLPOUT
     cmd(0x3A, [0x55])        # 16bit color
     cmd(0x36, [0x00])        # MADCTL
-    cmd(0x21)                # INVON (色が反転したら 0x20)
+    cmd(0x21)                # INVON
     cmd(0x29)                # DISPON
   end
 
-  def self.rgb(r, g, b)
-    ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
-  end
-
-  def fill(c)
-    fill_rect(0, 0, @width, @height, c)
-  end
-
   def fill_rect(x, y, w, h, c)
-    w = @width - x if x + w > @width
-    h = @height - y if y + h > @height
-    return if x < 0 || y < 0 || w <= 0 || h <= 0
     row = ((c >> 8).chr + (c & 0xFF).chr) * w
     @cs.write(0)
     win(x, y, w, h)
@@ -89,36 +61,46 @@ class ST7789
     @cs.write(1)
   end
 
-  # 画像コンバータの出力を描く
-  # pal: RGB565 の配列（最大 64 色）, rows: 1 行 1 文字列, s: 拡大率
-  CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+-"
-
-  def draw_indexed(x, y, w, h, pal, rows, s = 1)
-    return if x < 0 || y < 0 || x + w * s > @width || y + h * s > @height
-    tbl = Array.new(128)
+  # ランレングス圧縮画像を描く
+  # '0'-'F' = 色番号 1 ドット / 'a'-'z' + 色 = 同じ色が 2〜27 ドット続く
+  def draw_rle(x, y, w, h, pal, img, s)
+    tbl = Array.new(71)
     i = 0
-    while i < pal.size
+    while i < 16
       c = pal[i]
-      tbl[CHARS.getbyte(i)] = ((c >> 8).chr + (c & 0xFF).chr) * s
+      tbl[i < 10 ? 48 + i : 55 + i] = ((c >> 8).chr + (c & 0xFF).chr) * s
       i += 1
     end
     @cs.write(0)
     win(x, y, w * s, h * s)
-    r = 0
-    while r < h
-      line = rows[r]
-      buf = ""
-      j = 0
-      while j < w
-        buf << tbl[line.getbyte(j)]
-        j += 1
+    buf = ""
+    n = 0
+    i = 0
+    len = img.size
+    while i < len
+      b = img.getbyte(i)
+      run = 1
+      if b >= 97
+        run = b - 95
+        i += 1
+        b = img.getbyte(i)
       end
-      k = 0
-      while k < s
-        @spi.write(buf)
-        k += 1
+      px = tbl[b]
+      while run > 0
+        buf << px
+        n += 1
+        run -= 1
+        if n == w
+          k = 0
+          while k < s
+            @spi.write(buf)
+            k += 1
+          end
+          buf = ""
+          n = 0
+        end
       end
-      r += 1
+      i += 1
     end
     @cs.write(1)
   end
@@ -131,10 +113,7 @@ class ST7789
 
   private
 
-  # CS を下げた状態で呼ぶ。終わるとデータ送信モード
   def win(x, y, w, h)
-    x += @xo
-    y += @yo
     reg(0x2A, [x >> 8, x & 0xFF, (x + w - 1) >> 8, (x + w - 1) & 0xFF])
     reg(0x2B, [y >> 8, y & 0xFF, (y + h - 1) >> 8, (y + h - 1) & 0xFF])
     @dc.write(0)
@@ -155,56 +134,88 @@ spi = SPI.new(unit: :RP2040_SPI1, frequency: 20_000_000,
               sck_pin: 14, copi_pin: 15, cipo_pin: 12, mode: 3)
 lcd = ST7789.new(spi, 16, 9, 26)
 
-# 画像 40x40 / 16色 / 拡大 x6（液晶 240x240）
-pal = [
+# 画像 40x40 / 16色 / 拡大 x6
+RUBY_PAL = [
   0x83AF, 0x18E4, 0xE6DD, 0x5A69, 0x8518, 0x4BB4, 0xCE7D, 0xBD97,
   0xEF5E, 0x3B11, 0x6C55, 0x0000, 0x9C51, 0xDB90, 0x730C, 0x39C8
 ]
-data = [
-  'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
-  'BBBBBBBBBBBBBBBB11FFF11BBBBBBBBBBBBBBBBB',
-  'BBBBBBBBBBBBB1F9AAAA5559FBBBBBBBBBBBBBBB',
-  'BBBBBBBBBBB19AA455595000591BBBBBBBBBBBBB',
-  'BBBBBBBBBBF54A5590DDCC777A9BBBBBBBBBBBBB',
-  'BBBBBBBB19A45550DDC76666667FBBBBBBBBBBBB',
-  'BBBBBBB154A55EDDC6666666666A1BBBBBBBBBBB',
-  'BBBBBB154555EDC6666666222666FBBBBBBBBBBB',
-  'BBBBB1945590D766666222222226ABBBBBBBBBBB',
-  'BBBBB94A55E0766622288888822641BBBBBBBBBB',
-  'BBBBFAA55EC666622288888888266FBBBBBBBBBB',
-  'BBB154559C6662228888888882286FBBBBBBBBBB',
-  'BBB94559466622888888888888822FBBBBBBBBBB',
-  'BBFAA55A6622288888888888888229BBBBBBBBBB',
-  'B15455A666228888888888888882701BBBBBBBBB',
-  'BF455566622888888888888888240CEBBBBBBBBB',
-  '15455A66228888888888888862A0CCC1BBBBBBBB',
-  'FA555666288888888888888774ECCCCFBBFEFBBB',
-  '94599662888888888888886ACEECCCC3BEC3F31B',
-  'A55F9A2888888888888888C33E0000CEF01BBB3B',
-  'A5597A888888888888884E7CCCCCCCCEEFBBBBFB',
-  'A5595A28888888888840CC77CCCCCCCC00EE1B1B',
-  '55567228888888888AC00CCCCE0CCCCCCC0CCFBB',
-  'A556228888888888ACE0CC00307CCCCCC0C0CC1B',
-  'A5A628888888888600300E0E077CC0CC00C00C3B',
-  'A546288888888887030EE007CC7C0E0AA5CC00CB',
-  'A546888888888887303C3E20CCCE3C044A0C0EC1',
-  '5562288888888886CE30E260CC0E007444AC0E03',
-  '55668888888888847EEC7270C03ECE044440EECC',
-  '55628888888888673E0F36CCCEE70E0A44440ECC',
-  '5562888888888884C0CAEC7C0CC000CFA44A0E00',
-  '5A6288888888887EC7674C87CC702ECF9AA4028C',
-  '5A62888888888800C27778777EE72ECF0005A48C',
-  '9A62888888888670E288888780E36CEECCC0C867',
-  '9A66888888886870308876866CC9373CCC0C2277',
-  '9462888888847A6433027688777CC00CCCE0777C',
-  '976888888877C7A7CE3E728886777CC0E3CE000E',
-  'A228888888474446640EA7688267ECE03E0EEE11',
-  '2288888888704466667AA00C7C00EEE3ECECE01B',
-  '22888888886CA6666666674A0EE3E3EEEECEC0BB'
-]
 
-lcd.fill(0x0000)
-lcd.draw_indexed(0, 0, 40, 40, pal, data, 6)
-pal = nil
-data = nil
+ICON_IMG =
+  'zBzBaBa1bFa1zBbB1F9cAb59FyB19aA4b595b0591vBF54Aa590aDaCb7A9tB19A4b50aDC7' \
+  'e67FrB154Aa5EaDCi6A1pB154b5EDCf6b2b6FoB194a590D7d6g26AoB94Aa5E07b6b2e8a2' \
+  '641mBFaAa5ECc6b2g82a6FlB154a59Cb6b2h8a286FlB94a594b6a2l8a2FkBFaAa5Aa6b2m' \
+  '8a29jB154a5Ab6a2n82701iBF4b5b6a2n8240CEhB154a5Aa6a2m862A0bC1gBFAb5b62m8a' \
+  '74EcCFaBFEFbB945a9a62m86ACaEcC3BEC3F31BAa5F9A2n8Ca3Ec0CEF01bB3BAa597Am84' \
+  'E7gCaEFcBFBAa595A2j840aCa7gCa0aE1B1Bb567a2i8ACa0cCE0fC0aCFaBAa56a2i8ACE0' \
+  'aCa0307eC0C0aC1BA5A62i86a03a0E0E0a7aC0aCa0Ca0C3BA5462i87030aEa07aC7C0E0a' \
+  'A5aCa0CBA546j87303C3E20bCE3C0a4A0C0EC1a56a2i86CE30E260aC0Ea07b4AC0E03a5a' \
+  '6j847aEC7270C03ECE0c40aEaCa562i8673E0F36bCaE70E0Ac40EaCa562j84C0CAEC7C0a' \
+  'Cb0CFAa4A0Ea05A62i87EC7674C87aC702ECF9aA4028C5A62i8a0C2b78b7aE72ECFb05A4' \
+  '8C9A62h8670E2d8780E36CaEbC0C8679Aa6g8687030a8768a6aC9373bC0Ca2a79462f847' \
+  'A64a30276a8b7aCa0bCE0b7C976f8a7C7A7CE3E72b86b7aC0E3CEb0EAa2f847b4a640EA7' \
+  '6a8267ECE03E0bEa1a2g870a4c67aAa0C7Ca0bE3ECECE01Ba2g86CAg674A0aE3E3cECEC0' \
+  'aB'
+
+# QR（https://x.com/itojum1230）1 行 = 25bit
+QR_DATA = [
+  0x1FCE47F, 0x105F941, 0x175D15D, 0x1758B5D, 0x174455D,
+  0x1044441, 0x1FD557F, 0x0019500, 0x105BFCE, 0x08AFE1E,
+  0x074F78B, 0x0110419, 0x02D9541, 0x1998722, 0x16CF37B,
+  0x139A2AD, 0x11739F4, 0x0015510, 0x1FC3551, 0x1049111,
+  0x1749BF4, 0x17453C3, 0x174D90D, 0x10455B1, 0x1FDA509
+]
+QR_SCALE = 7
+QR_SIZE = 25
+
+def show_ruby(m, lcd)
+  m.clear
+  plot_mask(m, RUBY_BRIGHT, BRIGHT)
+  plot_mask(m, RUBY_DIM, DIM)
+  m.show
+  lcd.draw_rle(0, 0, 40, 40, RUBY_PAL, ICON_IMG, 6)
+end
+
+def show_twitter(m, lcd)
+  m.clear
+  plot_mask(m, TWITTER_ART, BRIGHT)
+  m.show
+  lcd.fill_rect(0, 0, 240, 240, 0xFFFF)
+  off = (240 - QR_SIZE * QR_SCALE) / 2
+  y = 0
+  while y < QR_SIZE
+    bits = QR_DATA[y]
+    x = 0
+    while x < QR_SIZE
+      if (bits >> (QR_SIZE - 1 - x)) & 1 == 1
+        x0 = x
+        while x < QR_SIZE && (bits >> (QR_SIZE - 1 - x)) & 1 == 1
+          x += 1
+        end
+        lcd.fill_rect(off + x0 * QR_SCALE, off + y * QR_SCALE,
+                      (x - x0) * QR_SCALE, QR_SCALE, 0x0000)
+      else
+        x += 1
+      end
+    end
+    y += 1
+  end
+end
+
+buttons = AdventureBoard.buttons
+twitter = false
+show_ruby(matrix, lcd)
 GC.start
+
+# A ボタンで切り替え
+while true
+  if buttons.take_press == :a
+    twitter = !twitter
+    if twitter
+      show_twitter(matrix, lcd)
+    else
+      show_ruby(matrix, lcd)
+    end
+    GC.start
+  end
+  sleep_ms(20)
+end
