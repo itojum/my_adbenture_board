@@ -54,7 +54,7 @@ Mac に入っている Ruby の標準ライブラリだけで動きます（gem 
 | `./board put LOCAL [REMOTE]` | 1 ファイルだけ書き込む（REMOTE 既定: `/home/run.rb`） |
 | `./board run [REMOTE]` | 再起動して REMOTE（既定: `/home/run.rb`）を実行 |
 | `./board push -d` / `./board run -d` | 実行したら、プログラムを動かしたまま終わる |
-| `./board app [LOCAL]` | `lib/*.rb` を `/lib/` に、`data/*` を `/home/` に、LOCAL を `/home/app.rb` に書き込む（ボードの起動時に自動で実行される） |
+| `./board app [LOCAL]` | `lib/*.rb` を `/lib/` に、`data/*` を `/home/` に、LOCAL を `/home/app.rb` に書き込み、再起動して起動時の出力を 20 秒表示する。`app.rb` は電源を入れると自動で動く |
 | `./board stop` | 実行中のプログラムを止める |
 | `./board sh "COMMAND"` | ボードのシェルでコマンドを実行して結果を表示（例: `./board sh "ls /home"`） |
 | `./board ports` | ボードのシェルのポートを探して表示 |
@@ -65,6 +65,8 @@ Mac に入っている Ruby の標準ライブラリだけで動きます（gem 
   `board` は Ctrl-C を送ってシェルのプロンプト `$> ` が返ってくるポートを使います。
   そのため、ポートを探すだけでも実行中のプログラムは止まります。
   決まったポートを使うなら `BOARD_PORT=/dev/cu.usbmodem1101 ./board push` のように指定します。
+- `app.rb` が起動時に固まると、`board` からも操作できなくなります。
+  そのときは USB を挿し直し、起動中の「Press 's' to skip」の間に `s` を送ると `app.rb` を飛ばして起動できます。
 - `lib/` と `data/` の下のサブフォルダは送りません（ボード側でフォルダを作れないため）。
 - ファイルは Web コンソールと同じ PicoModem プロトコルで送り、ボードが返す CRC32 で中身を照合します。
 - `push` と `run` は実行の前にボードを再起動します。

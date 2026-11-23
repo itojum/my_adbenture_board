@@ -8,8 +8,8 @@
 #                                 再起動して実行（Ctrl-C で停止）
 #   ./board put LOCAL [REMOTE]    1 ファイルだけ書き込む（REMOTE 既定: /home/run.rb）
 #   ./board run [REMOTE]          再起動して実行し、出力を表示
-#   ./board app [main.rb]         lib/*.rb を /lib に、data/* を /home に、main.rb を /home/app.rb に書き込む
-#                                 （起動時に自動実行）
+#   ./board app [main.rb]         lib/*.rb を /lib に、data/* を /home に、main.rb を /home/app.rb に書き込み、
+#                                 再起動して起動時の出力を表示する（電源を入れると自動で動く）
 #   ./board stop                  実行中のプログラムを止める
 #   ./board sh "ls /home"         シェルのコマンドを打って結果を表示
 #   ./board ports                 シェルのポートを探す
@@ -188,15 +188,7 @@ class Board
   # 起動中にポートを開け閉めしたりキーを送ったりすると再起動を繰り返すので、
   # ポートを開いたら何も送らずにプロンプトを待つ
   def reboot
-    sync
-    type_line("reboot")
-    deadline = now + 3
-    begin
-      read(0.2) while now < deadline # ポートが消えるまで待つ
-    rescue SystemCallError
-      nil
-    end
-    @io.close unless @io.closed?
+    send_reboot
 
     deadline = now + 30
     buf = "".b
@@ -226,6 +218,46 @@ class Board
     end
     @pending = "".b
     drain
+  end
+
+  # reboot を打ち、ポートが消えるまで待って閉じる
+  def send_reboot
+    sync
+    type_line("reboot")
+    deadline = now + 3
+    begin
+      read(0.2) while now < deadline
+    rescue SystemCallError
+      nil
+    end
+    @io.close unless @io.closed?
+  end
+
+  # 再起動して、起動時の出力（app.rb の出力を含む）を seconds 秒だけ表示する。
+  # 何も送らないので、起動した app.rb は動いたまま
+  def reboot_and_watch(seconds)
+    send_reboot
+    deadline = now + seconds
+    while now < deadline
+      if @io.closed?
+        begin
+          @io = File.open(@port, File::RDWR | File::NOCTTY | File::NONBLOCK)
+          @io.raw!
+        rescue SystemCallError
+          sleep 0.3
+          next
+        end
+      end
+      begin
+        out = read(0.2)
+      rescue SystemCallError
+        @io.close
+        next
+      end
+      $stdout.write(out.gsub(ANSI, ""))
+      $stdout.flush
+    end
+    puts
   end
 
   ANSI = /\e\[[0-9;?]*[A-Za-z]/n
@@ -350,6 +382,9 @@ begin
     if cmd == "push"
       board.reboot
       run_on(board, remote, detach)
+    elsif cmd == "app"
+      puts "[board] 再起動して起動時の出力を表示します（app.rb は動かしたままにします）"
+      board.reboot_and_watch(20)
     end
   when "run"
     remote = ARGV[0] || "/home/run.rb"
