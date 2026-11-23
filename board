@@ -74,7 +74,7 @@ class Board
       begin
         board.drain
         board.write(CTRL_C)
-        board.until_seen(PROMPT, 1.0)
+        board.until_seen(PROMPT, 4.0) # app.rb を止めてシェルが立ち上がるまで 1 秒以上かかる
         return port
       rescue Error
         next

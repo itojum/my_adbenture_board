@@ -55,10 +55,10 @@ while true
     GC.start
   end
 
-  # 表紙のときは 80ms ごとに 1 ドット左へ流す
+  # 表紙のときは 40ms ごとに 1 ドット左へ流す
   if mode == COVER
     tick += 1
-    if tick >= 4
+    if tick >= 2
       tick = 0
       scroll_text(matrix, scroll_x)
       scroll_x -= 1
